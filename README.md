@@ -1,60 +1,101 @@
 # LAN Deck
 
-A Linux desktop companion you can open from an iPhone on the same Wi-Fi. It serves a touch-friendly web interface with installed apps, open windows, and desktop media controls.
+Turn your phone into a remote for your computer. LAN Deck runs on your Windows, macOS or Linux machine and serves a touch-friendly page that any phone on the same Wi-Fi can open: a dock of your apps and open windows, an app launcher, and a music player with seek, artwork and volume.
 
-## Start it
+Nothing is installed on the phone and nothing leaves your network.
 
-Python 3.10+ is enough for app listing and launching. For window restore/focus on an X11 session, install `xdotool`; `wmctrl` is optional. Install `playerctl` for media controls. On Debian or Ubuntu:
+## Download
+
+Get the latest version from the [Releases page](https://github.com/newan0805/my-deck/releases).
+
+| System | Download | Install |
+|---|---|---|
+| **Windows 10/11** | `LAN-Deck-…-windows-setup.exe` | Run it. No admin rights needed. A portable `…-windows-portable.exe` is also available. |
+| **macOS** (Apple Silicon) | `LAN-Deck-…-macos-arm64.dmg` | Open it and drag **LAN Deck** to Applications. |
+| **Linux** (x86-64) | `LAN-Deck-…-linux-x64.tar.gz` | Extract it and run `./install.sh` (no sudo). |
+
+On first start, LAN Deck opens its **control page** in your browser. Scan the QR code with your phone's camera: the deck opens on the phone and pairs automatically. After that, LAN Deck lives in the system tray / menu bar and can start at login.
+
+### First-run prompts
+
+- **Windows:** Windows Defender Firewall asks whether LAN Deck may communicate on networks. Allow **Private networks** so your phone can connect. The download isn't code-signed yet, so SmartScreen may show "Windows protected your PC": choose **More info → Run anyway**.
+- **macOS:** the app isn't notarized yet. The first time, right-click **LAN Deck** in Applications and choose **Open**, then **Open** again. macOS asks once for permission to control Spotify or Music the first time you use media controls, and may ask for Local Network access.
+- **Linux:** install `playerctl` for media controls (`sudo apt install playerctl`). On GNOME with Wayland, run `./install-gnome-extension.sh` once and log out and in, so the deck can list and switch windows.
+
+## What it does
+
+- **Home dock:** your apps in the order you choose. A light under each icon shows whether it's open (bright), minimized (dim) or closed. Tap to open or bring to front; tap again to minimize. Icons never move by themselves; use **Arrange** to swap them. Rename windows (for example several terminals) from the press-and-hold menu.
+- **Apps:** everything installed, with search and categories.
+- **Player:** title, artist, artwork, a seek bar you can tap or drag, ±10 s, volume (where the player supports it). Tap the artwork to use it as the background.
+- **Live:** changes on the computer show up on the phone instantly (Server-Sent Events).
+- Works in portrait and landscape; landscape is a full-screen console-style deck.
+
+### What works where
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Apps list and launch | ✓ Start menu, incl. Store apps | ✓ /Applications | ✓ .desktop launchers |
+| Dock: open, front, minimize | ✓ per window | ✓ per app (like the Dock) | ✓ per window (X11, GNOME, Sway, Hyprland, niri) |
+| Media | ✓ any app in the system media controls (Spotify, browsers, YouTube…) | Spotify and Apple Music | ✓ any MPRIS player |
+| Media volume | – | ✓ | ✓ |
+| Desktops / workspaces | – (no public API) | – (no public API) | ✓ GNOME, Sway, Hyprland, niri, X11 |
+
+## Security
+
+Anyone with the 6-digit PIN can control the computer, so use LAN Deck on networks you trust (home Wi-Fi). Repeated wrong PINs from one device lock it out for a minute. The control page that shows the PIN only opens on the computer itself. Traffic is plain HTTP on your local network.
+
+## Run from source
+
+Python 3.10 or newer.
 
 ```sh
-sudo apt install xdotool wmctrl playerctl
-python3 app.py
+pip install -r requirements.txt   # optional: tray icon, QR code, Windows/macOS media
+python lan_deck.py                # server + tray icon + control page
+python app.py                     # server only, logs in the terminal
 ```
 
-On GNOME Wayland, install the one-time window bridge before starting the server:
+Settings (PIN, port, window names) are stored in:
+- Windows: `%APPDATA%\LAN Deck`
+- macOS: `~/Library/Application Support/LAN Deck`
+- Linux: `~/.config/lan-deck`
+
+Environment overrides: `DECK_PORT`, `DECK_TOKEN` (PIN), `DECK_HOST`, `DECK_CONFIG_DIR`.
+
+### Linux: background service and control app
 
 ```sh
-./install-gnome-extension.sh
-python3 app.py
+python3 deck_control.py --install     # systemd user service + "LAN Deck" app in your app grid
+python3 deck_control.py --uninstall
 ```
 
-The terminal prints a 6-digit numeric pairing PIN. Find the desktop's LAN IP with `hostname -I`, then open `http://<LAN-IP>:8765` on the iPhone while both devices are on the same network. Enter the PIN. Keep the terminal running while using the deck.
+The service starts at login and restarts if it crashes. The GTK control app shows the status, a pairing QR code, the PIN and port, start-at-login, integration checks and the log.
 
-To choose a different port or pairing code:
+For window control on X11 install `xdotool` (and optionally `wmctrl`); on GNOME Wayland install the bridge with `./install-gnome-extension.sh`. Until the bridge is active, the deck shows running apps from their processes, but can't switch between their windows.
+
+## Build the downloads yourself
 
 ```sh
-DECK_PORT=8766 DECK_TOKEN=123456 python3 app.py
+pip install -r requirements.txt pyinstaller
+python packaging/make_icons.py
+pyinstaller --noconfirm --clean packaging/lan_deck.spec
+python packaging/smoke_test.py --exe dist/lan-deck        # or dist/LANDeck.exe, "dist/LAN Deck.app/Contents/MacOS/LAN Deck"
 ```
 
-## Run it in the background (recommended)
+PyInstaller builds for the system it runs on. The GitHub Actions workflow (`.github/workflows/build.yml`) builds and tests on Windows, macOS and Linux for every push; pushing a tag like `v1.0.0` publishes a release with all downloads. The Windows installer is made with Inno Setup (`packaging/windows/LANDeck.iss`).
 
-```sh
-python3 deck_control.py --install
-```
+## Project layout
 
-This installs a systemd user service (`lan-deck.service`) that starts LAN Deck whenever you log in, restarts it if it crashes, and stops it at logout. It also adds a **LAN Deck** app to your app grid. Open it to see the server status and connected devices, scan a QR code with your phone (it opens the deck and pairs automatically), change the PIN or port, start or stop the server, and read the log.
+| Path | What it is |
+|---|---|
+| `app.py` | The server (Linux support built in) |
+| `backends/` | Windows and macOS support |
+| `lan_deck.py` | Desktop launcher: server + tray icon |
+| `autostart.py` | Start at login on each system |
+| `deck/static/` | The phone web app and the control page (`admin.html`) |
+| `deck_control.py` | Linux GTK control app and systemd service installer |
+| `gnome-extension/` | GNOME Shell bridge for window and desktop control on Wayland |
+| `packaging/` | Build recipe, installers and the cross-platform smoke test |
 
-The PIN and port are kept in `~/.config/lan-deck/config.json`, so your phone stays paired across restarts. `python3 deck_control.py --uninstall` removes the service and launcher (settings are kept).
+## iPhone tip
 
-## What works
-
-- Reads `.desktop` launchers from `/usr/share/applications` and `~/.local/share/applications`.
-- Uses each launcher's desktop icon where it can resolve it from the installed icon themes.
-- Launches selected apps.
-- Lists actual windows through desktop interfaces for X11, Sway/i3, Hyprland, niri, and GNOME Shell. The GNOME bridge is installed with `./install-gnome-extension.sh`; without it, Deck can see only XWayland windows. It never guesses open windows from process names.
-- Tapping a window focuses/restores it; tapping the focused window again minimizes it on GNOME and X11. Sway uses its scratchpad, Hyprland uses a special workspace, and niri uses a named hidden workspace.
-- Reads MPRIS players and sends play/pause, next, and previous commands through `playerctl`.
-- Stores the pairing PIN in the phone browser's local storage. Eight failed pairing attempts from one address pause pairing from that address for a minute. The service is intended for a trusted home LAN; anyone with the PIN can control the desktop.
-- The Dashboard shows open windows only. The installed app catalog is under the separate Apps tab. Hide individual tiles, turn off widgets/tabs, show or hide names, and change grid size from the gear menu.
-- The Desktops tab groups virtual workspaces by monitor on Sway, Hyprland, and niri. GNOME and common X11 window managers share workspaces across screens, which Deck shows as shared groups.
-- Live updates: the page subscribes to `/api/events` (Server-Sent Events). Track changes, play/pause and seeks are pushed the moment `playerctl --follow` reports them; window and desktop lists are checked on the server and only changes are sent. If the stream is unavailable the page falls back to polling.
-- Press and hold (or right-click) any tile to pin it to Home, open a new window, or hide it. Hidden items and pins are restored from Settings.
-- Includes PNG PWA icons and an Apple touch icon for iPhone Home Screen installation.
-
-## iPhone note
-
-The site is usable in Safari over the LAN. iOS requires a secure HTTPS context for full PWA installation and service-worker behavior, while this starter serves plain HTTP. To install it as a proper Home Screen PWA, put it behind HTTPS with a certificate the iPhone trusts. The PWA assets and manifest are already included.
-
-## Scope
-
-This first version is Linux-only. It does not stream the desktop screen or send keyboard/mouse input; it provides app/window selection and media controls. The server uses only Python's standard library and binds to all interfaces by default so the phone can reach it.
+In Safari, tap **Share → Add to Home Screen** for a full-screen app without the address bar.
