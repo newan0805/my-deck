@@ -47,6 +47,19 @@ def check(ok: bool, message: str) -> None:
         failures.append(message)
 
 
+def stop(proc: subprocess.Popen) -> None:
+    """Stop the server and anything it started (the one-file exe's app process, helpers)."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=15)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe")
@@ -55,7 +68,11 @@ def main() -> int:
     env = {**os.environ, "DECK_CONFIG_DIR": config, "DECK_TOKEN": TOKEN, "DECK_NO_BROWSER": "1", "DECK_HOST": "127.0.0.1"}
     cmd = [args.exe, "--headless", "--background", "--port", str(PORT)] if args.exe else [sys.executable, "app.py", "--port", str(PORT)]
     print("starting:", " ".join(cmd))
-    proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # Output goes to a file, not a pipe: the one-file Windows exe runs the app in a child process,
+    # and a pipe held open by that child would make reading the output wait forever.
+    log_path = Path(config) / "server-output.txt"
+    log_file = open(log_path, "wb")
+    proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log_file, stderr=subprocess.STDOUT)
     try:
         for _ in range(120):
             try:
@@ -110,12 +127,9 @@ def main() -> int:
         code, _ = post("/api/window/rename", {"id": "nope", "name": "x"})
         check(code == 404, "renaming a missing window is rejected")
     finally:
-        proc.terminate()
-        try:
-            out = proc.communicate(timeout=15)[0].decode("utf-8", "replace")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out = proc.communicate()[0].decode("utf-8", "replace")
+        stop(proc)
+        log_file.close()
+        out = log_path.read_bytes().decode("utf-8", "replace")
         print("---- server output (last 40 lines) ----")
         print("\n".join(out.splitlines()[-40:]))
     print("RESULT:", "FAILED: " + "; ".join(failures) if failures else "all checks passed")
