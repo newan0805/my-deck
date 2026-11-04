@@ -1,0 +1,6 @@
+{
+  "uuid": "landdeck@chainit.local",
+  "name": "LAN Deck Window Bridge",
+  "description": "Exposes open GNOME windows to the paired LAN Deck app.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"]
+}
