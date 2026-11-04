@@ -74,7 +74,11 @@ def _powershell(script: str, timeout: float = 120) -> str:
 # ---------------------------------------------------------------- icons (shell, 256 px, alpha kept)
 
 _ICON_SCRIPT = r'''
-$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = 'Continue'
+Add-Type -AssemblyName System.Drawing
+$compiled = $true
+try {
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
 using System;
 using System.Drawing;
@@ -87,13 +91,14 @@ public static class DeckIcons {
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
   private static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory factory);
   [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr h);
-  public static bool Save(string item, string png, int size) {
+  public static string Save(string item, string png, int size) {
     try {
       IShellItemImageFactory f;
       SHCreateItemFromParsingName(item, IntPtr.Zero, typeof(IShellItemImageFactory).GUID, out f);
       SIZE s; s.cx = size; s.cy = size;
       IntPtr hbm;
-      if (f.GetImage(s, 0x4, out hbm) != 0) return false;   // SIIGBF_ICONONLY
+      int hr = f.GetImage(s, 0x4, out hbm);   // SIIGBF_ICONONLY
+      if (hr != 0) return "GetImage 0x" + hr.ToString("X8");
       try {
         using (Bitmap src = Image.FromHbitmap(hbm)) {
           Rectangle r = new Rectangle(0, 0, src.Width, src.Height);
@@ -113,22 +118,37 @@ public static class DeckIcons {
           } finally { src.UnlockBits(d); }
         }
       } finally { DeleteObject(hbm); }
-      return true;
-    } catch { return false; }
+      return "";
+    } catch (Exception e) { return e.GetType().Name + ": " + e.Message; }
   }
 }
 "@
-$jobs = Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8 | ConvertFrom-Json
-foreach ($j in $jobs) { [void][DeckIcons]::Save($j.item, $j.png, 256) }
+} catch { $compiled = $false; Write-Output "ERR compile :: $($_.Exception.Message)" }
+$jobs = @(Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8 | ConvertFrom-Json)
+$ok = 0
+foreach ($j in $jobs) {
+  $err = 'helper not compiled'
+  if ($compiled) { $err = [DeckIcons]::Save($j.item, $j.png, 256) }
+  if ($err -and $j.fallback) {
+    # The program's own icon (smaller, but always available for an .exe)
+    try {
+      $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($j.fallback)
+      $icon.ToBitmap().Save($j.png, [System.Drawing.Imaging.ImageFormat]::Png)
+      $err = ''
+    } catch { $err = "$err; fallback: $($_.Exception.Message)" }
+  }
+  if ($err) { Write-Output "ERR $($j.item) :: $err" } else { $ok++ }
+}
+Write-Output "DONE $ok/$($jobs.Count)"
 '''
 
 _icon_lock = threading.Lock()
-_icon_jobs: dict[str, str] = {}          # png path -> shell item (file path or shell:AppsFolder\id)
+_icon_jobs: dict[str, tuple[str, str]] = {}   # png path -> (shell item, fallback .exe)
 _icon_done = threading.Event()
 _icon_done.set()
 
 
-def _queue_icons(jobs: dict[str, str]) -> None:
+def _queue_icons(jobs: dict[str, tuple[str, str]]) -> None:
     """Extract icons in one PowerShell run (in the background)."""
     with _icon_lock:
         new = {png: item for png, item in jobs.items() if not Path(png).exists() and png not in _icon_jobs}
@@ -148,14 +168,20 @@ def _extract_icons() -> None:
             return
         ICONS.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
-            json.dump([{"item": item, "png": png} for png, item in batch.items()], f)
+            json.dump([{"item": item, "fallback": fallback, "png": png} for png, (item, fallback) in batch.items()], f)
             jobs_file = f.name
         try:
             script_file = DATA / "icons.ps1"
             DATA.mkdir(parents=True, exist_ok=True)
             script_file.write_text(_ICON_SCRIPT, encoding="utf-8-sig")
-            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                            "-File", str(script_file), jobs_file], capture_output=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+            r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                "-File", str(script_file), jobs_file], capture_output=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+            out = r.stdout.decode("utf-8", "replace").splitlines()
+            errors = [l for l in out if l.startswith("ERR ")]
+            done = next((l for l in out if l.startswith("DONE ")), "DONE ?")
+            _log(f"icons: saved {done[5:]}" + (f"; first problems: {' | '.join(errors[:3])}" if errors else ""))
+            if r.stderr.strip():
+                _log("icons (stderr): " + r.stderr.decode("utf-8", "replace").strip()[:400])
         except (OSError, subprocess.TimeoutExpired) as exc:
             _log(f"Icon extraction failed: {exc}")
         finally:
@@ -206,7 +232,7 @@ def _scan_apps() -> list[dict]:
     start = [a for a in (data.get("apps") or []) if isinstance(a, dict) and a.get("Name") and a.get("AppID")]
     link_target = {_norm(l.get("name", "")): l.get("target", "") for l in links}
     apps: dict[str, dict] = {}
-    jobs: dict[str, str] = {}
+    jobs: dict[str, tuple[str, str]] = {}
     for a in start:
         app_id, name = str(a["AppID"]), str(a["Name"])
         if name.casefold() in {"uninstall", "readme", "help"} or name.casefold().startswith("uninstall "):
@@ -215,7 +241,7 @@ def _scan_apps() -> list[dict]:
         target = app_id if app_id.lower().endswith(".exe") else link_target.get(_norm(name), "")
         exe = Path(target.replace("\\", "/")).name.lower() if target.lower().endswith(".exe") else ""
         png = ICONS / f"{key}.png"
-        jobs[str(png)] = f"shell:AppsFolder\\{app_id}"
+        jobs[str(png)] = (f"shell:AppsFolder\\{app_id}", target if target.lower().endswith(".exe") else "")
         apps[key] = {"id": key, "name": name, "icon": str(png), "icon_url": f"/icon/{key}", "wm_class": exe,
                      "exec": app_id, "categories": "", "exe": exe,
                      # Store apps: "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App" -> "windowsterminal"
@@ -227,7 +253,7 @@ def _scan_apps() -> list[dict]:
                 continue
             key = "a" + _key(str(l.get("lnk", "")))
             png = ICONS / f"{key}.png"
-            jobs[str(png)] = target
+            jobs[str(png)] = (target, target)
             apps[key] = {"id": key, "name": str(l.get("name", "")), "icon": str(png), "icon_url": f"/icon/{key}",
                          "wm_class": Path(target).name.lower(), "exec": "lnk:" + str(l.get("lnk", "")), "categories": "",
                          "exe": Path(target).name.lower(), "package": ""}
@@ -386,7 +412,7 @@ def _match_app(exe_path: str, title: str) -> dict | None:
 
 def windows() -> tuple[list[dict], bool, str]:
     result: list[dict] = []
-    jobs: dict[str, str] = {}
+    jobs: dict[str, tuple[str, str]] = {}
 
     def visit(hwnd, _):
         try:
@@ -412,7 +438,7 @@ def windows() -> tuple[list[dict], bool, str]:
             else:
                 key = "x" + _key(exe.lower() or title)
                 if exe:
-                    jobs[str(ICONS / f"{key}.png")] = exe
+                    jobs[str(ICONS / f"{key}.png")] = (exe, exe)
                 app_id, app_name, icon_url = "", Path(exe).stem if exe else "", f"/icon/{key}" if exe else ""
             result.append({"id": f"w:{int(hwnd)}", "title": title, "class": Path(exe).name, "app_id": app_id,
                            "app_name": app_name, "icon_url": icon_url, "minimized": bool(user32.IsIconic(hwnd))})
