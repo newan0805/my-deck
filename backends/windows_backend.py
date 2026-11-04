@@ -124,7 +124,8 @@ public static class DeckIcons {
 }
 "@
 } catch { $compiled = $false; Write-Output "ERR compile :: $($_.Exception.Message)" }
-$jobs = @(Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8 | ConvertFrom-Json)
+# PowerShell 5.1 emits a parsed JSON array as ONE object: assign it, don't wrap it in @().
+$jobs = (Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8) | ConvertFrom-Json
 $ok = 0
 foreach ($j in $jobs) {
   $err = 'helper not compiled'

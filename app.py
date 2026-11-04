@@ -1219,11 +1219,16 @@ def lan_addresses() -> list[str]:
             found.append(s.getsockname()[0])
     except OSError:
         pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            found.append(info[4][0])
-    except OSError:
-        pass
+    # Ask the system for its interfaces. (Resolving the host name can take ~30 s on macOS.)
+    if IS_WINDOWS:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                found.append(info[4][0])
+        except OSError:
+            pass
+    else:
+        out = run(["ifconfig"]) if IS_MAC else run(["ip", "-4", "-o", "addr", "show", "scope", "global"])
+        found += re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
     good: list[str] = []
     for ip in found:
         try:
@@ -1376,10 +1381,20 @@ def _install_backend() -> None:
 _install_backend()
 
 
+class DeckServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Phones drop connections mid-reply all the time (sleep, Wi-Fi changes): not worth a traceback.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def create_server(port: int | None = None) -> ThreadingHTTPServer:
     global PORT
     PORT = port or PORT
-    server = ThreadingHTTPServer((os.environ.get("DECK_HOST", "0.0.0.0"), PORT), Handler)
+    server = DeckServer((os.environ.get("DECK_HOST", "0.0.0.0"), PORT), Handler)
     server.daemon_threads = True
     return server
 
