@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>LAN Deck</title>
+  <style>
+    :root { --bg:#0b1118; --surface:#131b25; --surface-2:#1a2430; --line:rgba(255,255,255,.08); --text:#e8edf3; --muted:#8b97a8;
+            --accent:#1a9fff; --accent-2:#6cc4ff; --good:#4cc38a; --warn:#e8b04b; --danger:#ef5d6a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(120% 60% at 80% -10%, #16304a 0, transparent 60%), var(--bg); color: var(--text);
+           font: 500 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 760px; margin: 0 auto; padding: 28px 20px 48px; display: grid; gap: 16px; }
+    header { display: flex; align-items: center; gap: 14px; }
+    header img { width: 44px; height: 44px; }
+    header h1 { margin: 0; font-size: 22px; font-weight: 800; }
+    header .sub { color: var(--muted); font-size: 13px; }
+    .status { margin-left: auto; display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 16px;
+              background: var(--surface); border: 1px solid var(--line); font-weight: 700; font-size: 13px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px rgba(76,195,138,.2); }
+    .dot.off { background: var(--danger); box-shadow: none; }
+    section { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; }
+    section h2 { margin: 0 0 4px; font-size: 15px; font-weight: 800; }
+    section > p.lead { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+    #pair.flash { animation: flash 1.4s ease-out; }
+    @keyframes flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
+    .pair { display: grid; grid-template-columns: 200px 1fr; gap: 22px; align-items: center; }
+    .qr { width: 200px; height: 200px; border-radius: 14px; background: #fff; padding: 8px; display: grid; place-items: center; color: #333; font-size: 12px; text-align: center; }
+    .qr svg { width: 100%; height: 100%; display: block; }
+    .label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .pin { font: 800 34px/1.1 ui-monospace, "SF Mono", Consolas, monospace; letter-spacing: .18em; margin: 2px 0 12px; }
+    .urls { display: grid; gap: 6px; margin-bottom: 14px; }
+    .url { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .url code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 13px ui-monospace, Consolas, monospace; color: var(--accent-2); }
+    button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--surface-2); border-radius: 10px; padding: 8px 14px; font-weight: 700; }
+    button:hover { border-color: rgba(108,196,255,.4); }
+    button.small { padding: 4px 10px; font-size: 12px; }
+    button.primary { background: var(--accent); color: #04121f; border-color: transparent; }
+    .row { display: flex; align-items: center; gap: 12px; min-height: 52px; border-top: 1px solid var(--line); }
+    .row:first-of-type { border-top: 0; }
+    .row .grow { flex: 1; min-width: 0; }
+    .row .hint { color: var(--muted); font-size: 12px; }
+    .switch { appearance: none; -webkit-appearance: none; width: 46px; height: 28px; border-radius: 14px; background: #2b3746; position: relative; cursor: pointer; margin: 0; flex: none; transition: background .15s; }
+    .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+    .switch:checked { background: var(--accent); }
+    .switch:checked::after { transform: translateX(18px); }
+    input[type=number] { width: 100px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+    .caps { display: grid; gap: 8px; }
+    .cap { display: flex; align-items: center; gap: 10px; }
+    .cap b { width: 18px; text-align: center; }
+    .ok { color: var(--good); } .no { color: var(--muted); }
+    .notes { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(232,176,75,.08); border: 1px solid rgba(232,176,75,.25); color: #f0d9a8; font-size: 13px; }
+    .notes p { margin: 4px 0; }
+    pre { margin: 0; max-height: 260px; overflow: auto; padding: 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font: 12px/1.5 ui-monospace, Consolas, monospace; color: #b9c3d0; white-space: pre-wrap; word-break: break-all; }
+    .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(10px); opacity: 0; transition: .2s; padding: 10px 16px; border-radius: 10px; background: #223042; border: 1px solid var(--line); font-weight: 700; pointer-events: none; }
+    .toast.show { opacity: 1; transform: translateX(-50%); }
+    footer { color: var(--muted); font-size: 12px; text-align: center; }
+    @media (max-width: 560px) { .pair { grid-template-columns: 1fr; justify-items: center; text-align: center; } .url { justify-content: center; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="/icon-192.png" alt="">
+      <div><h1>LAN Deck</h1><div class="sub" id="sub">Control this computer from your phone</div></div>
+      <div class="status"><i class="dot" id="dot"></i><span id="status">Running</span></div>
+    </header>
+
+    <section id="pair">
+      <h2>Connect your phone</h2>
+      <p class="lead">Join the same Wi-Fi as this computer, then point your phone's camera at the code. It opens the deck and pairs automatically.</p>
+      <div class="pair">
+        <div class="qr" id="qr">Loading…</div>
+        <div>
+          <div class="label">PIN</div>
+          <div class="pin" id="pin">······</div>
+          <div class="label">Address</div>
+          <div class="urls" id="urls"></div>
+          <button id="new-pin">New PIN</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <div class="row"><div class="grow"><div>Start at login</div><div class="hint" id="autostart-hint">Runs in the background with a tray icon</div></div><input type="checkbox" class="switch" id="autostart"></div>
+      <div class="row"><div class="grow"><div>Port</div><div class="hint">Phones connect to this port</div></div><input type="number" id="port" min="1024" max="65535"><button id="port-apply">Apply</button></div>
+    </section>
+
+    <section>
+      <h2>On this computer</h2>
+      <div class="caps" id="caps"></div>
+      <div class="notes" id="notes" hidden></div>
+    </section>
+
+    <section>
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+
+    <footer id="footer"></footer>
+  </main>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const $ = s => document.querySelector(s);
+    let state = null, toastTimer, logPinned = true;
+    const toast = t => { const el = $('#toast'); el.textContent = t; el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2000) };
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const post = (path, body = {}) => fetch('/admin/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Deck-Admin': '1' }, body: JSON.stringify(body) }).then(r => r.json());
+    const uptime = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
+
+    async function load() {
+      try {
+        state = await (await fetch('/admin/api/state', { cache: 'no-store' })).json();
+      } catch {
+        $('#dot').classList.add('off'); $('#status').textContent = 'Not running'; return;
+      }
+      $('#dot').classList.remove('off');
+      $('#status').textContent = `${state.clients} phone${state.clients === 1 ? '' : 's'} connected`;
+      $('#sub').textContent = `${state.capabilities.platform} · up ${uptime(state.uptime)}`;
+      if ($('#qr').dataset.pin !== state.pin + state.urls[0]) {
+        $('#qr').innerHTML = state.qr || 'Install the “qrcode” Python package to show a QR code';
+        $('#qr').dataset.pin = state.pin + state.urls[0];
+      }
+      $('#pin').textContent = state.pin;
+      const urls = state.urls.map(u => `<div class="url"><code>${esc(u)}</code><button class="small" data-copy="${esc(u)}">Copy</button></div>`).join('');
+      if ($('#urls').innerHTML !== urls) $('#urls').innerHTML = urls;
+      if (document.activeElement !== $('#port')) $('#port').value = state.port;
+      const a = state.autostart || {};
+      $('#autostart').checked = !!a.enabled; $('#autostart').disabled = !a.supported;
+      $('#autostart-hint').textContent = a.supported ? `Uses ${a.method}` : 'Not available here';
+      const c = state.capabilities;
+      $('#caps').innerHTML = [['Open apps and windows', c.windows], ['Media controls', c.media], ['Desktops / workspaces', c.workspaces]]
+        .map(([n, ok]) => `<div class="cap"><b class="${ok ? 'ok' : 'no'}">${ok ? '✓' : '–'}</b><span class="${ok ? '' : 'no'}">${n}</span></div>`).join('');
+      $('#notes').hidden = !c.notes.length; $('#notes').innerHTML = c.notes.map(n => `<p>${esc(n)}</p>`).join('');
+      const log = $('#log'); const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+      log.textContent = state.log.join('\n'); if (atBottom || logPinned) { log.scrollTop = log.scrollHeight; logPinned = false }
+      $('#footer').textContent = `LAN Deck ${state.version} · settings in ${state.config}`;
+    }
+
+    $('#urls').addEventListener('click', async e => {
+      const b = e.target.closest('[data-copy]'); if (!b) return;
+      try { await navigator.clipboard.writeText(b.dataset.copy); toast('Copied') } catch { toast(b.dataset.copy) }
+    });
+    $('#new-pin').onclick = async () => {
+      if (!confirm('Create a new PIN? Phones paired with the current PIN will need to scan the new code.')) return;
+      const r = await post('new-pin'); toast(r.ok ? 'New PIN created' : (r.error || 'Failed')); load();
+    };
+    $('#autostart').onchange = async e => {
+      const r = await post('autostart', { enabled: e.target.checked });
+      toast(r.ok ? (e.target.checked ? 'Will start at login' : 'Won’t start at login') : (r.error || 'Failed')); load();
+    };
+    $('#port-apply').onclick = async () => {
+      const r = await post('port', { port: Number($('#port').value) });
+      if (!r.ok) return toast(r.error || 'Failed');
+      if (r.restarting) { toast('Restarting on the new port…'); setTimeout(() => location.href = r.url, 1500) } else toast(r.message);
+    };
+    if (location.hash === '#pair') { $('#pair').classList.add('flash'); history.replaceState(null, '', location.pathname) }
+    load(); setInterval(load, 2000);
+  </script>
+</body>
+</html>

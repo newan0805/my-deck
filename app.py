@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""LAN Deck: a small, local Linux desktop control service."""
+"""LAN Deck: control your computer's apps, windows and media from a phone on the same network.
+
+Linux support lives in this file. Windows and macOS swap in their own functions from
+backends/ at startup (see _install_backend at the bottom).
+"""
 from __future__ import annotations
 
+import collections
+import ipaddress
 import json
 import queue
+import socket
+import sys
 import mimetypes
 import functools
 import ast
@@ -19,9 +27,47 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+VERSION = "1.0.0"
 ROOT = Path(__file__).resolve().parent
-STATIC = ROOT / "deck" / "static"
-CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "lan-deck" / "config.json"
+# Packaged builds (PyInstaller) unpack bundled files to sys._MEIPASS.
+RESOURCES = Path(getattr(sys, "_MEIPASS", ROOT))
+STATIC = RESOURCES / "deck" / "static"
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+
+
+def config_dir() -> Path:
+    if os.environ.get("DECK_CONFIG_DIR"):
+        return Path(os.environ["DECK_CONFIG_DIR"])
+    if IS_WINDOWS:
+        return Path(os.environ.get("APPDATA") or Path.home()) / "LAN Deck"
+    if IS_MAC:
+        return Path.home() / "Library" / "Application Support" / "LAN Deck"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "lan-deck"
+
+
+CONFIG_FILE = config_dir() / "config.json"
+LOG: collections.deque[str] = collections.deque(maxlen=400)
+LOG_FILE: Path | None = None  # set by the desktop launcher
+
+
+def log(message: str) -> None:
+    """Keep recent lines for the control page and print them when there is a console."""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}"
+    LOG.append(line)
+    if LOG_FILE:
+        try:
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > 1_000_000:
+                LOG_FILE.replace(LOG_FILE.with_suffix(".old.log"))
+            with LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+    if sys.stdout:  # windowed builds have no console
+        try:
+            print(line, flush=True)
+        except (OSError, ValueError):
+            pass
 
 
 def load_config() -> dict:
@@ -36,10 +82,18 @@ def load_config() -> dict:
         try:
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
-            CONFIG_FILE.chmod(0o600)
+            if not IS_WINDOWS:
+                CONFIG_FILE.chmod(0o600)
         except OSError:
             pass
     return config
+
+
+def save_config(config: dict) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    if not IS_WINDOWS:
+        CONFIG_FILE.chmod(0o600)
 
 
 _CONFIG = load_config()
@@ -450,8 +504,8 @@ def labelled_windows() -> tuple[list[dict], bool, str]:
             if entry and entry.get("app_id", "") == w["app_id"]:
                 w["label"] = entry.get("name", "")
         live = {w["id"] for w in items}
-        if supported and any(i.startswith("g:") for i in live):
-            stale = [k for k in labels if k.startswith("g:") and k not in live]
+        if supported and any(not i.startswith("p:") for i in live):
+            stale = [k for k in labels if not k.startswith("p:") and k not in live]
             if stale:
                 for k in stale:
                     labels.pop(k, None)
@@ -818,7 +872,7 @@ class LiveHub:
             try:
                 self.publish(kind, self.snapshot(kind))
             except Exception as exc:  # keep the stream alive whatever a backend does
-                print(f"live {kind} update failed: {exc}")
+                log(f"live {kind} update failed: {exc}")
             self.wake[kind].wait(self.INTERVALS[kind])
             self.wake[kind].clear()
 
@@ -848,7 +902,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if self.path.startswith(("/api/status", "/api/events")):
             return  # polled by the control app / long-lived stream: keep the log readable
-        print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+        log(f"{self.client_address[0]}  {fmt % args}")
 
     def send_json(self, data, status=200):
         body = json.dumps(data).encode()
@@ -881,20 +935,25 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path.startswith("/icon/"):
             app_id = urllib.parse.unquote(path[len("/icon/"):])
-            app = next((a for a in desktop_entries() if a["id"] == app_id), None)
-            icon = resolve_icon(app["icon"]) if app else None
+            if BACKEND:
+                icon = BACKEND.icon_path(app_id)
+            else:
+                app = next((a for a in desktop_entries() if a["id"] == app_id), None)
+                icon = resolve_icon(app["icon"]) if app else None
             if not icon:
                 return self.send_error(404)
             body = icon.read_bytes()
             self.send_response(200)
-            self.send_header("Content-Type", mimetypes.guess_type(icon.name)[0] or "application/octet-stream")
+            self.send_header("Content-Type", image_mime(icon) or mimetypes.guess_type(icon.name)[0] or "application/octet-stream")
             self.send_header("Cache-Control", "public, max-age=86400")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
         if path == "/api/health":
-            return self.send_json({"ok": True, "name": "LAN Deck"})
+            return self.send_json({"ok": True, "name": "LAN Deck", "version": VERSION})
+        if path == "/admin" or path.startswith("/admin/"):
+            return self.admin_get(path)
         if path == "/api/media/art":
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             supplied = (query.get("token") or [""])[0]
@@ -920,7 +979,8 @@ class Handler(BaseHTTPRequestHandler):
                 with HUB.lock:
                     clients = len(HUB.clients)
                 return self.send_json({"ok": True, "clients": clients, "uptime": round(time.time() - STARTED), "port": PORT,
-                                       "bridge": gnome_wayland_windows()[1], "playerctl": bool(shutil.which("playerctl")), "pid": os.getpid()})
+                                       "bridge": False if BACKEND else gnome_wayland_windows()[1],
+                                       "playerctl": bool(shutil.which("playerctl")), "pid": os.getpid(), "platform": sys.platform})
             if path == "/api/session":
                 return self.send_json({"ok": True})
             if path == "/api/apps":
@@ -970,6 +1030,8 @@ class Handler(BaseHTTPRequestHandler):
             HUB.unsubscribe(q)
 
     def do_POST(self):
+        if urllib.parse.urlparse(self.path).path.startswith("/admin/"):
+            return self.admin_post()
         if not self.authorized():
             return self.send_json({"error": "Unauthorized"}, 401)
         try:
@@ -988,6 +1050,9 @@ class Handler(BaseHTTPRequestHandler):
             if ok:
                 HUB.refresh("windows")
             return self.send_json({"ok": ok, **({} if ok else {"error": error})}, 200 if ok else 404)
+        if path == "/api/window/activate" and BACKEND:
+            ok, error = BACKEND.activate_window(str(payload.get("id", "")))
+            return self.send_json({"ok": ok, **({} if ok else {"error": error})}, 200 if ok else 400)
         if path == "/api/window/activate":
             wid = str(payload.get("id", ""))
             if wid.startswith("p:"):
@@ -1103,6 +1168,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": ok, **({} if ok else {"error": error})}, 200 if ok else 503)
         if path == "/api/media/action":
             action = payload.get("action")
+            if action in {"play-pause", "next", "previous", "seek", "back10", "fwd10", "volume"} and BACKEND:
+                try:
+                    state = BACKEND.media_action(action, str(payload.get("player", "")), payload)
+                except Exception as exc:  # a media app misbehaving must not break the server
+                    return self.send_json({"error": f"Media control failed: {exc}"}, 500)
+                HUB.publish("media", state)
+                return self.send_json({"ok": True, "media": state})
             if action not in {"play-pause", "next", "previous", "seek", "back10", "fwd10", "volume"} or not shutil.which("playerctl"):
                 return self.send_json({"error": "Media control unavailable"}, 400)
             player = str(payload.get("player", ""))
@@ -1133,18 +1205,217 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"error": "Not found"}, 404)
 
 
-def main():
-    server = ThreadingHTTPServer((os.environ.get("DECK_HOST", "0.0.0.0"), PORT), Handler)
-    server.daemon_threads = True
-    print(f"LAN Deck listening on port {PORT}")
-    print(f"Pairing code: {TOKEN}")
-    print("Open http://<this-computer-LAN-IP>:%s on your iPhone (same Wi-Fi)." % PORT)
-    if os.environ.get("WAYLAND_DISPLAY") and "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold() and not gnome_wayland_windows()[1]:
-        print("Install the GNOME window bridge once with ./install-gnome-extension.sh to list and focus GNOME windows.")
-    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        print("No graphical session variables found. Start LAN Deck from a terminal inside the desktop session for window controls.")
+# ---------------------------------------------------------------- control page (this computer only)
+
+RESTART_HOOK = None  # set by the tray launcher so a port change can restart the server in place
+
+
+def lan_addresses() -> list[str]:
+    """IPv4 addresses a phone on the same network can reach; the default-route one first."""
+    found: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))  # picks the outgoing interface; nothing is sent
+            found.append(s.getsockname()[0])
+    except OSError:
+        pass
+    # Ask the system for its interfaces. (Resolving the host name can take ~30 s on macOS.)
+    if IS_WINDOWS:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                found.append(info[4][0])
+        except OSError:
+            pass
+    else:
+        out = run(["ifconfig"]) if IS_MAC else run(["ip", "-4", "-o", "addr", "show", "scope", "global"])
+        found += re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out)
+    good: list[str] = []
+    for ip in found:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        # 172.16-31.x.0.1 is what Docker and VM bridges give the host; phones can't reach those.
+        bridge = addr in ipaddress.ip_network("172.16.0.0/12") and ip.endswith(".0.1") and good
+        if not addr.is_loopback and not addr.is_link_local and not bridge and ip not in good:
+            good.append(ip)
+    return good or ["127.0.0.1"]
+
+
+def qr_svg(text: str) -> str:
+    try:
+        import qrcode
+        import qrcode.constants
+    except ImportError:
+        return ""
+    q = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    q.add_data(text)
+    q.make(fit=True)
+    m = q.get_matrix()
+    n = len(m)
+    cells = "".join(f"M{x},{y}h1v1h-1z" for y, row in enumerate(m) for x, on in enumerate(row) if on)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {n} {n}" shape-rendering="crispEdges">'
+            f'<rect width="{n}" height="{n}" fill="#fff"/><path d="{cells}" fill="#0b1118"/></svg>')
+
+
+def capabilities() -> dict:
+    if BACKEND:
+        return BACKEND.capabilities()
+    bridge = gnome_wayland_windows()[1] if os.environ.get("WAYLAND_DISPLAY") else False
+    notes = []
+    if os.environ.get("WAYLAND_DISPLAY") and "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").casefold() and not bridge:
+        notes.append("Install the GNOME window bridge (install-gnome-extension.sh), then log out and in, to switch windows.")
     if not shutil.which("playerctl"):
-        print("Install playerctl for media controls (for example: sudo apt install playerctl).")
+        notes.append("Install playerctl for media controls (for example: sudo apt install playerctl).")
+    return {"platform": "Linux", "windows": True, "media": bool(shutil.which("playerctl")),
+            "workspaces": bool(workspace_state().get("supported")), "notes": notes}
+
+
+def _admin_allowed(handler) -> bool:
+    """The control page shows the PIN, so only this computer may use it, and only through a local
+    host name (blocks other devices and DNS-rebinding tricks)."""
+    try:
+        if not ipaddress.ip_address(handler.client_address[0]).is_loopback:
+            return False
+    except ValueError:
+        return False
+    host = handler.headers.get("Host", "").strip().lower()
+    host = host[1:].split("]")[0] if host.startswith("[") else host.rsplit(":", 1)[0]
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _admin_get(self, path):
+    if not _admin_allowed(self):
+        return self.send_error(403, "The control page is only available on this computer")
+    if path in ("/admin", "/admin/"):
+        body = (STATIC / "admin.html").read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return None
+    if path == "/admin/api/state":
+        import autostart
+        urls = [f"http://{ip}:{PORT}/" for ip in lan_addresses()]
+        with HUB.lock:
+            clients = len(HUB.clients)
+        return self.send_json({
+            "version": VERSION, "pin": TOKEN, "port": PORT, "urls": urls,
+            "qr": qr_svg(f"{urls[0]}#pin={TOKEN}"), "clients": clients,
+            "uptime": round(time.time() - STARTED), "capabilities": capabilities(),
+            "autostart": autostart.status(), "can_restart": RESTART_HOOK is not None,
+            "config": str(CONFIG_FILE), "log": list(LOG)[-150:],
+        })
+    return self.send_error(404)
+
+
+def _admin_post(self):
+    global TOKEN
+    # The custom header forces a CORS preflight, which this server never approves, so web pages
+    # open in the browser cannot trigger these actions.
+    if not _admin_allowed(self) or self.headers.get("X-Deck-Admin") != "1":
+        return self.send_json({"error": "Not allowed"}, 403)
+    try:
+        size = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(min(size, 4096)) or b"{}")
+    except (ValueError, json.JSONDecodeError):
+        return self.send_json({"error": "Invalid request"}, 400)
+    path = urllib.parse.urlparse(self.path).path
+    config = load_config()
+    if path == "/admin/api/new-pin":
+        TOKEN = config["token"] = f"{secrets.randbelow(1_000_000):06d}"
+        save_config(config)
+        log("A new PIN was created; phones need to pair again")
+        return self.send_json({"ok": True, "pin": TOKEN})
+    if path == "/admin/api/autostart":
+        import autostart
+        ok, error = autostart.set_enabled(bool(payload.get("enabled")))
+        return self.send_json({"ok": ok, "autostart": autostart.status(), **({"error": error} if error else {})}, 200 if ok else 500)
+    if path == "/admin/api/port":
+        try:
+            port = int(payload.get("port"))
+            if not 1024 <= port <= 65535:
+                raise ValueError
+        except (TypeError, ValueError):
+            return self.send_json({"error": "Choose a port between 1024 and 65535"}, 400)
+        config["port"] = port
+        save_config(config)
+        if RESTART_HOOK:
+            threading.Timer(0.3, RESTART_HOOK, args=(port,)).start()
+            return self.send_json({"ok": True, "restarting": True, "url": f"http://127.0.0.1:{port}/admin"})
+        return self.send_json({"ok": True, "restarting": False, "message": "Saved. Restart LAN Deck to use the new port."})
+    return self.send_json({"error": "Not found"}, 404)
+
+
+Handler.admin_get = _admin_get
+Handler.admin_post = _admin_post
+
+
+# ---------------------------------------------------------------- platform backends
+
+BACKEND = None
+
+
+def _install_backend() -> None:
+    """On Windows and macOS, replace the Linux implementations with the platform's own."""
+    global BACKEND, desktop_entries, launch_desktop_app, windows, workspace_state, workspace_action, media_state, media_art
+    if IS_WINDOWS:
+        from backends import windows_backend as backend
+    elif IS_MAC:
+        from backends import macos_backend as backend
+    else:
+        return
+    BACKEND = backend
+    backend.LOG = log
+    desktop_entries = backend.desktop_entries
+    launch_desktop_app = backend.launch_desktop_app
+    windows = backend.windows
+    workspace_state = backend.workspace_state
+    workspace_action = backend.workspace_action
+    media_state = backend.media_state
+    media_art = backend.media_art
+
+
+_install_backend()
+
+
+class DeckServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Phones drop connections mid-reply all the time (sleep, Wi-Fi changes): not worth a traceback.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def create_server(port: int | None = None) -> ThreadingHTTPServer:
+    global PORT
+    PORT = port or PORT
+    server = DeckServer((os.environ.get("DECK_HOST", "0.0.0.0"), PORT), Handler)
+    server.daemon_threads = True
+    return server
+
+
+def startup_messages() -> None:
+    log(f"LAN Deck {VERSION} listening on port {PORT}")
+    log(f"Pairing PIN: {TOKEN}")
+    for ip in lan_addresses():
+        log(f"Open http://{ip}:{PORT}/ on your phone (same Wi-Fi)")
+    log(f"Control page (this computer only): http://127.0.0.1:{PORT}/admin")
+    for note in capabilities().get("notes", []):
+        log(note)
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="LAN Deck server")
+    parser.add_argument("--port", type=int, help="port to listen on (default: from settings, 8765)")
+    args = parser.parse_args()
+    server = create_server(args.port)
+    startup_messages()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

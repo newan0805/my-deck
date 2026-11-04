@@ -1,0 +1,15 @@
+# LAN Deck runs on Python's standard library; these add the tray icon, the pairing QR code,
+# and the platform media/app integrations.
+qrcode>=7.4
+Pillow>=10.0
+pystray>=0.19
+
+# macOS: running apps and app icons without extra permissions
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+
+# Windows: now-playing info and controls from the system media controls
+winrt-runtime>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=2.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
