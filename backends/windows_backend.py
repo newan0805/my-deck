@@ -77,8 +77,8 @@ _ICON_SCRIPT = r'''
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Continue'
 Add-Type -AssemblyName System.Drawing
-$compiled = $true
-try {
+$compiled = ($args[1] -ne 'fallback')
+if ($compiled) { try {
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
 using System;
 using System.Drawing;
@@ -101,21 +101,27 @@ public static class DeckIcons {
       if (hr != 0) return "GetImage 0x" + hr.ToString("X8");
       try {
         using (Bitmap src = Image.FromHbitmap(hbm)) {
-          Rectangle r = new Rectangle(0, 0, src.Width, src.Height);
-          BitmapData d = src.LockBits(r, ImageLockMode.ReadOnly, src.PixelFormat);
+          // Copy row by row: shell bitmaps are often bottom-up (negative stride), so the
+          // pixels are not one forward block starting at Scan0.
+          int w = src.Width, h = src.Height;
+          Rectangle r = new Rectangle(0, 0, w, h);
+          byte[] px = new byte[w * h * 4];
+          BitmapData sd = src.LockBits(r, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
           try {
-            // FromHbitmap drops alpha; re-read the same pixels as ARGB when they carry any.
-            byte[] px = new byte[Math.Abs(d.Stride) * d.Height];
-            Marshal.Copy(d.Scan0, px, 0, px.Length);
-            bool alpha = false;
-            if (Image.GetPixelFormatSize(src.PixelFormat) == 32)
-              for (int i = 3; i < px.Length; i += 4) if (px[i] != 0) { alpha = true; break; }
-            if (alpha) {
-              using (Bitmap a = new Bitmap(d.Width, d.Height, d.Stride, PixelFormat.Format32bppArgb, d.Scan0)) a.Save(png, ImageFormat.Png);
-            } else {
-              src.Save(png, ImageFormat.Png);
-            }
-          } finally { src.UnlockBits(d); }
+            for (int y = 0; y < h; y++)
+              Marshal.Copy(new IntPtr(sd.Scan0.ToInt64() + (long)y * sd.Stride), px, y * w * 4, w * 4);
+          } finally { src.UnlockBits(sd); }
+          bool alpha = false;
+          for (int i = 3; i < px.Length; i += 4) if (px[i] != 0) { alpha = true; break; }
+          if (!alpha) for (int i = 3; i < px.Length; i += 4) px[i] = 255;   // icon without transparency
+          using (Bitmap dst = new Bitmap(w, h, PixelFormat.Format32bppPArgb)) {   // shell pixels are premultiplied
+            BitmapData dd = dst.LockBits(r, ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+            try {
+              for (int y = 0; y < h; y++)
+                Marshal.Copy(px, y * w * 4, new IntPtr(dd.Scan0.ToInt64() + (long)y * dd.Stride), w * 4);
+            } finally { dst.UnlockBits(dd); }
+            dst.Save(png, ImageFormat.Png);
+          }
         }
       } finally { DeleteObject(hbm); }
       return "";
@@ -123,7 +129,7 @@ public static class DeckIcons {
   }
 }
 "@
-} catch { $compiled = $false; Write-Output "ERR compile :: $($_.Exception.Message)" }
+} catch { $compiled = $false; Write-Output "ERR compile :: $($_.Exception.Message)" } }
 # PowerShell 5.1 emits a parsed JSON array as ONE object: assign it, don't wrap it in @().
 $jobs = (Get-Content -LiteralPath $args[0] -Raw -Encoding UTF8) | ConvertFrom-Json
 $ok = 0
@@ -175,9 +181,14 @@ def _extract_icons() -> None:
             script_file = DATA / "icons.ps1"
             DATA.mkdir(parents=True, exist_ok=True)
             script_file.write_text(_ICON_SCRIPT, encoding="utf-8-sig")
-            r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                                "-File", str(script_file), jobs_file], capture_output=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+            cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_file), jobs_file]
+            r = subprocess.run(cmd, capture_output=True, timeout=300, creationflags=CREATE_NO_WINDOW)
             out = r.stdout.decode("utf-8", "replace").splitlines()
+            if not any(l.startswith("DONE ") for l in out):
+                # The high-resolution helper crashed: get each program's own icon instead.
+                _log("icons: high-resolution helper failed (" + r.stderr.decode("utf-8", "replace").strip()[:200] + "); using program icons")
+                r = subprocess.run(cmd + ["fallback"], capture_output=True, timeout=300, creationflags=CREATE_NO_WINDOW)
+                out = r.stdout.decode("utf-8", "replace").splitlines()
             errors = [l for l in out if l.startswith("ERR ")]
             done = next((l for l in out if l.startswith("DONE ")), "DONE ?")
             _log(f"icons: saved {done[5:]}" + (f"; first problems: {' | '.join(errors[:3])}" if errors else ""))
