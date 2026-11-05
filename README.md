@@ -99,3 +99,7 @@ PyInstaller builds for the system it runs on. The GitHub Actions workflow (`.git
 ## iPhone tip
 
 In Safari, tap **Share → Add to Home Screen** for a full-screen app without the address bar.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
