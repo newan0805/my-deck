@@ -4,6 +4,8 @@
 
 <img width="1884" height="942" alt="image" src="https://github.com/user-attachments/assets/851af3fc-f29e-4558-800f-b6d9fc8aaeb7" />
 
+<img width="573" height="790" alt="image" src="https://github.com/user-attachments/assets/46b10c10-d668-4297-afa4-10d7d203f338" />
+
 
 Turn your phone into a remote for your computer. LAN Deck runs on your Windows, macOS or Linux machine and serves a touch-friendly page that any phone on the same Wi-Fi can open: a dock of your apps and open windows, an app launcher, and a music player with seek, artwork and volume.
 
