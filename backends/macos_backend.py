@@ -139,7 +139,16 @@ def icon_path(icon_id: str) -> Path | None:
         return None
     png = ICONS / f"{icon_id}.png"
     if not png.exists():
-        _icon_done.wait(20)
+        with _icon_lock:
+            bundle = _icon_queue.get(str(png))
+        if bundle:  # asked for now: convert it right away instead of waiting its turn
+            ICONS.mkdir(parents=True, exist_ok=True)
+            try:
+                _save_icon(bundle, png)
+            except Exception as exc:
+                _log(f"icon failed: {exc}")
+        else:
+            _icon_done.wait(20)
     return png if png.exists() and png.stat().st_size > 0 else None
 
 
